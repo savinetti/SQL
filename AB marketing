@@ -1,0 +1,200 @@
+WITH 
+Stocks AS (
+    SELECT 
+        toDate(st.data_date) AS stock_date,
+        st.wh_guid AS wh_guid,
+        wh.shop_guid AS shop_guid,
+        wh.shop_name AS shop_name,
+        st.feature_guid AS feature_guid,
+        g.feature_full_code AS feature_full_code,
+        g.model_id AS model_id,
+        g.model_name AS model_name,
+        c.colorname AS colorname,
+        bmh.category_name AS category_name,
+        bmh.subcategory_name AS subcategory_name,
+        SUM(st.end_qty) AS end_qty,
+        SUM(st.cost) AS cost_sebest,
+        SUM(st.prc) AS prc,
+        CASE toDayOfWeek(toDate(st.data_date))
+            WHEN 1 THEN 'Понедельник'
+            WHEN 2 THEN 'Вторник'
+            WHEN 3 THEN 'Среда'
+            WHEN 4 THEN 'Четверг'
+            WHEN 5 THEN 'Пятница'
+            WHEN 6 THEN 'Суббота'
+            WHEN 7 THEN 'Воскресенье'
+        END AS weekday_name
+    FROM mart.btbf_stocks st
+    LEFT JOIN mart.btbd_warehouses_shops wh 
+        ON wh.wh_guid = st.wh_guid
+    LEFT JOIN mart.btbd_goods g
+        ON st.feature_guid = g.feature_guid
+    LEFT JOIN mart.btbd_colors c
+        ON g.color_guid = c.color_guid 
+    LEFT JOIN mart.btbd_models_hierarchy bmh
+        ON g.model_guid = bmh.model_guid
+    WHERE 
+        (wh.wh_type = 'zal' OR wh.wh_type = 'sklad')
+        AND toDate(st.data_date) BETWEEN '2025-04-01' AND '2025-07-03'
+    GROUP BY 
+        stock_date,
+        wh_guid,
+        shop_guid,
+        shop_name,
+        feature_guid,
+        feature_full_code,
+        model_id,
+        model_name,
+        colorname,
+        category_name,
+        subcategory_name
+),
+Sales AS (
+    SELECT 
+        toDate(sa.doc_datetime) AS sale_date,
+        sa.wh_guid AS wh_guid,
+        sa.feature_guid AS feature_guid,
+        SUM(sa.op_qty) AS total_sold_qty,
+        SUM(sa.cost) AS total_cost,
+        SUM(sa.revenue) AS total_revenue
+    FROM mart.btbf_sales sa
+    WHERE 
+        toDate(sa.doc_datetime) BETWEEN '2025-04-01' AND '2025-07-03'
+    GROUP BY 
+        sale_date,
+        wh_guid,
+        feature_guid
+),
+JoinedData AS (
+SELECT 
+    s.stock_date AS date,
+    s.weekday_name AS day,
+    s.shop_guid,
+    s.shop_name AS shop,
+    s.feature_guid AS "GUID товара",
+    CASE 
+        WHEN position('/' IN s.feature_full_code) > 0 THEN
+            CASE 
+                WHEN position('-' IN substring(s.feature_full_code, position('/' IN s.feature_full_code) + 1)) > 0 THEN
+                    concat(
+                        substring(
+                            substring(s.feature_full_code, position('/' IN s.feature_full_code) + 1),
+                            1,
+                            position('-' IN substring(s.feature_full_code, position('/' IN s.feature_full_code) + 1)) - 1
+                        ),
+                        substring(
+                            substring(s.feature_full_code, position('/' IN s.feature_full_code) + 1),
+                            position('-' IN substring(s.feature_full_code, position('/' IN s.feature_full_code) + 1)),
+                            position('-' IN substring(
+                                substring(s.feature_full_code, position('/' IN s.feature_full_code) + 1),
+                                position('-' IN substring(s.feature_full_code, position('/' IN s.feature_full_code) + 1)) + 1
+                            ))
+                        )
+                    )
+                ELSE
+                    substring(s.feature_full_code, position('/' IN s.feature_full_code) + 1)
+            END
+        ELSE
+            CASE 
+                WHEN position('-' IN s.feature_full_code) > 0 THEN
+                    substring(s.feature_full_code, 1, position('-' IN s.feature_full_code) + position('-' IN substring(s.feature_full_code, position('-' IN s.feature_full_code) + 1)) - 1)
+                ELSE
+                    s.feature_full_code
+            END
+    END AS article,
+    s.model_id AS model_id,
+    s.model_name AS model_name,
+    s.colorname AS colorname,
+    s.category_name AS category_name,
+    s.subcategory_name AS subcategory_name,
+    s.end_qty AS end_qty,
+    s.cost_sebest AS cost_sebest,
+    s.prc AS prc_stock,
+    COALESCE(sl.total_sold_qty, 0) AS total_sold_qty ,
+    COALESCE(sl.total_cost, 0) AS total_cost,
+    COALESCE(sl.total_revenue, 0) AS total_revenue
+FROM Stocks s
+LEFT JOIN Sales sl 
+    ON s.stock_date = sl.sale_date
+    AND s.wh_guid = sl.wh_guid
+    AND s.feature_guid = sl.feature_guid
+ORDER BY 
+    s.stock_date ASC, 
+    s.shop_name, 
+    s.model_name)
+    SELECT date, day,article, model_id, model_name, colorname,category_name, subcategory_name,SUM(end_qty),SUM(cost_sebest),SUM(prc_stock),SUM(total_sold_qty), SUM(total_cost), SUM(total_revenue)
+    FROM JoinedData jd
+    WHERE article IN (
+    '018326-170', '018748-910', '018983-910', '017975-310', '017895-310', 
+    '017896-310', '015252-100', '015917-100', '016665-100', '017969-919', 
+    '018608-999', '019115-800', '018354-500', '018370-500', '018425-919', 
+    '018421-521', '017969-300', '018599-810', '018346-810', '018727-999', 
+    '016667-910', '016990-170', '018610-999', '018610-800', '018983-310', 
+    '018229-910', '015389-311', '016674-170', '019130-100', '019094-170', 
+    '018644-910', '012674-700', '019129-170', '015456-700', '018435-800', 
+    '018552-890', '019310-521', '018488-390', '017661-521', '017616-500', 
+    '018310-410', '016101-911', '018963-595', '018419-600', '018355-910', 
+    '018647-800', '017274-100', '019068-910', '017390-515', '015836-100', 
+    '018001-170', '016979-800', '018364-521', '017106-521', '018771-170', 
+    '018197-999', '018610-810', '016337-170', '017771-810', '017772-810', 
+    '015487-700', '018866-170', '016990-800', '018478-500', '019173-500', 
+    '019172-500', '019174-500', '018277-595', '019140-800', '019136-800', 
+    '019005-521', '019008-521', '018974-170', '018675-310', '017401-100', 
+    '017047-100', '017635-919', '018369-500', '018691-300', '019130-910', 
+    '018854-521', '019086-400', '019116-170', '019066-400', '019165-200', 
+    '018595-170', '019076-400', '017952-310', '018634-310', '018249-200', 
+    '018249-310', '019072-170', '016337-310', '018867-170', '018972-810', 
+    '019164-200', '019156-170', '018977-170', '018976-170', '019166-200', 
+    '019107-100', '019164-910', '019166-910', '018249-170', '018769-810', 
+    '019080-800', '019130-700', '017718-170', '019078-100', '018129-170', 
+    '019165-910', '019157-170', '019109-100', '017933-800', '018251-170', 
+    '019159-170', '019064-700', '018352-595', '019122-170', '019193-170', 
+    '019193-500', '018407-170', '016082-521', '018126-170', '019103-700', 
+    '017275-999', '018879-521', '019159-521', '019171-170', '017821-170', 
+    '018319-300', '019051-700', '019061-170', '018868-390', '017660-521', 
+    '019151-500', '017933-999', '018243-910', '018857-170', '019081-919', 
+    '018968-100', '018994-170', '018862-500', '018847-100', '019157-999', 
+    '019112-521', '019067-100', '018004-800', '018365-521', '018572-100', 
+    '018613-700', '017722-390', '014925-100', '019040-100', '018769-919', 
+    '018414-910', '019191-390', '019128-170', '018742-310', '019066-100', 
+    '018221-170', '018640-521', '016678-170', '019214-999', '015901-521', 
+    '017938-999', '016992-100', '018076-300', '016986-170', '017036-311', 
+    '017745-390', '018974-521', '017675-170', '019077-100', '018651-919', 
+    '018598-810', '018075-890', '019155-999', '018558-300', '018436-310', 
+    '018210-170', '018768-200', '019241-800', '019245-170', '017169-999', 
+    '017181-999', '018482-521', '018879-200', '019111-500', '016423-800', 
+    '019211-311', '019179-521', '019178-521', '019103-910', '018770-100', 
+    '018850-521', '018625-310', '018167-910', '019016-100', '019089-170', 
+    '019184-100', '017969-170', '018619-521', '018332-521', '018570-999', 
+    '018969-700', '019152-700', '019178-800', '019179-800', '019203-390', 
+    '019192-390', '016060-300', '017969-999', '017848-800', '019138-230', 
+    '019135-999', '016669-170', '019229-999', '018970-999', '019198-390', 
+    '019345-170', '019298-100', '018870-170', '019276-170', '019125-170', 
+    '018772-170', '019121-300', '019163-170', '019162-170', '019232-170', 
+    '018962-310', '019261-999', '018860-170', '019133-999', '016415-999', 
+    '017946-170', '018136-170', '018989-170', '019235-500', '018853-300', 
+    '018600-311', '017054-170', '018981-500', '018250-310', '018745-800', 
+    '018735-800', '017771-310', '017961-311', '018504-300', '018504-800', 
+    '016976-999', '018497-390', '018075-390', '019164-595', '019166-595', 
+    '019165-595', '018408-170', '018860-400', '019159-310', '017773-999', 
+    '018849-521', '018418-910', '019302-911', '018639-999', '017008-999', 
+    '017137-910', '018848-521', '019275-999', '019065-911', '019261-200', 
+    '016359-910', '017667-910', '019116-910', '019272-100', '018015-910', 
+    '018123-910', '018074-500', '016267-170', '019000-170', '018770-810', 
+    '018360-300', '017371-170', '018318-910', '018239-311', '019156-500', 
+    '019230-595', '019197-500', '019198-999', '019264-999', '019336-999', 
+    '016674-800', '019130-300', '019157-500', '017841-521', '019272-999', 
+    '019132-310', '019129-521', '017171-890', '019366-999', '019138-999', 
+    '019366-100', '016365-100', '018726-999', '017360-911'
+)
+    GROUP BY 
+    date,
+    day,
+    article,
+    model_id,
+    model_name,
+    colorname,
+    category_name,
+    subcategory_name
+    
+    

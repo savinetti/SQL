@@ -1,0 +1,138 @@
+WITH SalesData AS (
+    SELECT 
+        toDate(sa.doc_datetime) AS sale_date,
+        g.feature_guid,
+        g.feature_full_code,
+        g.model_id AS model_id,
+        g.model_name AS model_name,
+        c.colorname AS colorname,
+        bmh.category_name AS category_name,
+        bmh.subcategory_name AS subcategory_name,
+        CASE 
+            WHEN position('/' IN g.feature_full_code) > 0 THEN
+                CASE 
+                    WHEN position('-' IN substring(g.feature_full_code, position('/' IN g.feature_full_code) + 1)) > 0 THEN
+                        concat(
+                            substring(
+                                substring(g.feature_full_code, position('/' IN g.feature_full_code) + 1),
+                                1,
+                                position('-' IN substring(g.feature_full_code, position('/' IN g.feature_full_code) + 1)) - 1
+                            ),
+                            substring(
+                                substring(g.feature_full_code, position('/' IN g.feature_full_code) + 1),
+                                position('-' IN substring(g.feature_full_code, position('/' IN g.feature_full_code) + 1)),
+                                position('-' IN substring(
+                                    substring(g.feature_full_code, position('/' IN g.feature_full_code) + 1),
+                                    position('-' IN substring(g.feature_full_code, position('/' IN g.feature_full_code) + 1)) + 1
+                                ))
+                            )
+                        )
+                    ELSE
+                        substring(g.feature_full_code, position('/' IN g.feature_full_code) + 1)
+                END
+            ELSE
+                CASE 
+                    WHEN position('-' IN g.feature_full_code) > 0 THEN
+                        substring(g.feature_full_code, 1, position('-' IN g.feature_full_code) + position('-' IN substring(g.feature_full_code, position('-' IN g.feature_full_code) + 1)) - 1)
+                    ELSE
+                        g.feature_full_code
+                END
+        END AS article,
+        SUM(sa.op_qty) AS total_sold_qty
+    FROM mart.btbf_sales sa
+    JOIN mart.btbd_goods g 
+        ON sa.feature_guid = g.feature_guid
+    LEFT JOIN mart.btbd_colors c 
+        ON g.color_guid = c.color_guid
+    LEFT JOIN mart.btbd_models_hierarchy bmh 
+        ON g.model_guid = bmh.model_guid
+    WHERE 
+        toDate(sa.doc_datetime) BETWEEN '2025-01-01' AND '2025-07-03'
+    GROUP BY 
+        sale_date,
+        g.feature_guid,
+        feature_full_code,
+        model_id,
+        model_name,
+        colorname,
+        category_name,
+        subcategory_name
+),
+FilteredSales AS (
+    SELECT 
+        sale_date,
+        model_id,
+        model_name,
+        colorname,
+        category_name,
+        subcategory_name,
+        article,
+        total_sold_qty
+    FROM SalesData
+    WHERE article IN ('018326-170', '018748-910', '018983-910', '017975-310', '017895-310', 
+    -- ... (весь список артикулов) ...
+    '017360-911')
+),
+WeeklySales AS (
+    SELECT 
+        toWeek(sale_date) AS week_number,
+        article,
+        model_id,
+        model_name,
+        colorname,
+        category_name,
+        subcategory_name,
+        SUM(total_sold_qty) / COUNT(DISTINCT sale_date) AS daily_speed
+    FROM FilteredSales
+    GROUP BY 
+        week_number,
+        article,
+        model_id,
+        model_name,
+        colorname,
+        category_name,
+        subcategory_name
+)
+SELECT 
+    ws.article,
+    ws.model_id,
+    ws.model_name,
+    ws.colorname,
+    ws.category_name,
+    ws.subcategory_name,
+    ROUND(SUM(if(ws.week_number = 1, ws.daily_speed, 0)), 2) AS week1_speed,
+    ROUND(SUM(if(ws.week_number = 2, ws.daily_speed, 0)), 2) AS week2_speed,
+    ROUND(SUM(if(ws.week_number = 3, ws.daily_speed, 0)), 2) AS week3_speed,
+    ROUND(SUM(if(ws.week_number = 4, ws.daily_speed, 0)), 2) AS week4_speed,
+    ROUND(SUM(if(ws.week_number = 5, ws.daily_speed, 0)), 2) AS week5_speed,
+    ROUND(SUM(if(ws.week_number = 6, ws.daily_speed, 0)), 2) AS week6_speed,
+    ROUND(SUM(if(ws.week_number = 7, ws.daily_speed, 0)), 2) AS week7_speed,
+    ROUND(SUM(if(ws.week_number = 8, ws.daily_speed, 0)), 2) AS week8_speed,
+    ROUND(SUM(if(ws.week_number = 9, ws.daily_speed, 0)), 2) AS week9_speed,
+    ROUND(SUM(if(ws.week_number = 10, ws.daily_speed, 0)), 2) AS week10_speed,
+    ROUND(SUM(if(ws.week_number = 11, ws.daily_speed, 0)), 2) AS week11_speed,
+    ROUND(SUM(if(ws.week_number = 12, ws.daily_speed, 0)), 2) AS week12_speed,
+    ROUND(SUM(if(ws.week_number = 13, ws.daily_speed, 0)), 2) AS week13_speed,
+    ROUND(SUM(if(ws.week_number = 14, ws.daily_speed, 0)), 2) AS week14_speed,
+    ROUND(SUM(if(ws.week_number = 15, ws.daily_speed, 0)), 2) AS week15_speed,
+    ROUND(SUM(if(ws.week_number = 16, ws.daily_speed, 0)), 2) AS week16_speed,
+    ROUND(SUM(if(ws.week_number = 17, ws.daily_speed, 0)), 2) AS week17_speed,
+    ROUND(SUM(if(ws.week_number = 18, ws.daily_speed, 0)), 2) AS week18_speed,
+    ROUND(SUM(if(ws.week_number = 19, ws.daily_speed, 0)), 2) AS week19_speed,
+    ROUND(SUM(if(ws.week_number = 20, ws.daily_speed, 0)), 2) AS week20_speed,
+    ROUND(SUM(if(ws.week_number = 21, ws.daily_speed, 0)), 2) AS week21_speed,
+    ROUND(SUM(if(ws.week_number = 22, ws.daily_speed, 0)), 2) AS week22_speed,
+    ROUND(SUM(if(ws.week_number = 23, ws.daily_speed, 0)), 2) AS week23_speed,
+    ROUND(SUM(if(ws.week_number = 24, ws.daily_speed, 0)), 2) AS week24_speed,
+    ROUND(SUM(if(ws.week_number = 25, ws.daily_speed, 0)), 2) AS week25_speed,
+    ROUND(SUM(if(ws.week_number = 26, ws.daily_speed, 0)), 2) AS week26_speed,
+    ROUND(SUM(if(ws.week_number = 27, ws.daily_speed, 0)), 2) AS week27_speed
+FROM WeeklySales ws
+GROUP BY 
+    ws.article,
+    ws.model_id,
+    ws.model_name,
+    ws.colorname,
+    ws.category_name,
+    ws.subcategory_name
+ORDER BY ws.article;

@@ -1,0 +1,66 @@
+SELECT DISTINCT
+ '=IMAGE(СТРОЧН("https://storage.yandexcloud.net/locatalogfotos/img/' || g.model_guid || '.jpg")' ||
+      ')' AS "Фото",
+cap.dat AS "Дата старта",
+    g.model_name AS "Номенклатура",
+    con.link AS "Ссылка",
+ CASE 
+                WHEN position('-' IN g.feature_full_code) > 0 THEN
+                    substring(g.feature_full_code, 1, position('-' IN g.feature_full_code) + position('-' IN substring(g.feature_full_code, position('-' IN g.feature_full_code) + 1)) - 1)
+                ELSE
+                    g.feature_full_code
+    END AS "Артикул сайт",
+    g.model_id || ';' || c.colorname AS "Артикул-Цвет",
+    CASE 
+        WHEN position('/' IN g.feature_full_code) > 0 THEN
+            CASE 
+                WHEN position('-' IN substring(g.feature_full_code, position('/' IN g.feature_full_code) + 1)) > 0 THEN
+                    concat(
+                        substring(
+                            substring(g.feature_full_code, position('/' IN g.feature_full_code) + 1),
+                            1,
+                            position('-' IN substring(g.feature_full_code, position('/' IN g.feature_full_code) + 1)) - 1
+                        ),
+                        substring(
+                            substring(g.feature_full_code, position('/' IN g.feature_full_code) + 1),
+                            position('-' IN substring(g.feature_full_code, position('/' IN g.feature_full_code) + 1)),
+                            position('-' IN substring(
+                                substring(g.feature_full_code, position('/' IN g.feature_full_code) + 1),
+                                position('-' IN substring(g.feature_full_code, position('/' IN g.feature_full_code) + 1)) + 1
+                            ))
+                        )
+                    )
+                ELSE
+                    substring(g.feature_full_code, position('/' IN g.feature_full_code) + 1)
+            END
+        ELSE
+            CASE 
+                WHEN position('-' IN g.feature_full_code) > 0 THEN
+                    substring(g.feature_full_code, 1, position('-' IN g.feature_full_code) + position('-' IN substring(g.feature_full_code, position('-' IN g.feature_full_code) + 1)) - 1)
+                ELSE
+                    g.feature_full_code
+            END
+    END AS "Артикул Маркетинг",
+    AVG(cst.cost) OVER(PARTITION BY "Артикул Маркетинг") AS "Себес"
+FROM mart.btbd_goods g
+LEFT JOIN mart.btbd_colors c ON g.color_guid = c.color_guid
+LEFT JOIN db1.content_on_site con 
+    ON con.model_id = g.model_id
+    AND con.color = c.colorname
+LEFT JOIN mart.btbf_capsules cap 
+ON g.model_id=cap.model_id
+AND c.colorname=cap.colorname
+LEFT JOIN mart.btbd_models_hierarchy bmh
+ON bmh.model_guid=g.model_guid
+LEFT JOIN (
+    SELECT 
+        feature_guid,
+        argMax(cost, doc_date) AS cost
+    FROM mart.btbf_costprice
+    WHERE doc_date <= now()
+    GROUP BY feature_guid
+) cst ON g.feature_guid = cst.feature_guid
+WHERE g.model_id LIKE 'ЦБ%'
+AND bmh.category_name NOT LIKE 'Кафе'
+AND cap.dat >= subtractYears(today(), 2)
+ORDER BY cap.dat DESC

@@ -1,0 +1,189 @@
+WITH first_prc AS (
+    SELECT 
+        model_id,
+        colorname,
+        argMin(new_price, date_from) AS first_prc_price
+    FROM mart.btbf_retail_prices
+    WHERE price_type = 'ПРЦ'
+    GROUP BY model_id, colorname
+),
+current_prc AS (
+    SELECT 
+        model_id,
+        colorname,
+        date_from,
+        new_price AS current_prc_price
+    FROM mart.btbf_retail_prices
+    WHERE price_type = 'ПРЦ'
+),
+Sales AS (
+    SELECT 
+        toDate(s.doc_datetime) AS sale_date,
+        g.model_id AS model_id,
+        g.model_guid AS model_guid,
+        g.feature_guid AS feature_guid,
+        bc.colorname AS color_name,
+        CONCAT(g.model_id, ';', bc.colorname) AS colormodel,
+        bmh.subgroup_name AS subgroup_name,
+        bmh.category_name AS category_name,
+        sz.sizename AS size,
+        brp.new_price AS price_per_item,
+        costp.cost AS cost_per_item,
+        fp.first_prc_price AS first_prc,
+        cprc.current_prc_price AS current_prc,
+        cap.dat AS capsule_start_date,
+        SUM(s.op_qty) AS cnt,
+        SUM(s.revenue) AS revenue, 
+        SUM(s.cost) AS cost,
+        if(SUM(s.revenue) < 0, 0, SUM(s.revenue) - SUM(s.cost)) AS margin
+    FROM 
+        mart.btbf_sales AS s
+    LEFT JOIN mart.btbd_warehouses_shops AS wh 
+        ON s.wh_guid = wh.wh_guid
+    LEFT JOIN mart.btbd_goods g 
+        ON s.feature_guid = g.feature_guid
+    LEFT JOIN mart.btbd_colors bc 
+        ON g.color_guid = bc.color_guid
+    LEFT JOIN mart.btbd_models_hierarchy bmh 
+        ON s.model_guid = bmh.model_guid
+    LEFT JOIN mart.btbd_sizes sz 
+        ON g.size_guid = sz.size_guid
+    ASOF LEFT JOIN mart.btbf_retail_prices brp 
+        ON brp.model_id = g.model_id 
+        AND brp.colorname = bc.colorname
+        AND toDate(s.doc_datetime) >= brp.date_from
+        AND brp.price_type IN ('ПРЦ', 'Скидка')
+    ASOF LEFT JOIN current_prc cprc
+        ON cprc.model_id = g.model_id 
+        AND cprc.colorname = bc.colorname
+        AND toDate(s.doc_datetime) >= cprc.date_from
+    ASOF LEFT JOIN mart.btbf_capsules cap 
+        ON cap.model_id = g.model_id 
+        AND cap.colorname = bc.colorname
+        AND toDate(s.doc_datetime) >= cap.dat
+    ASOF LEFT JOIN mart.btbf_costprice costp 
+        ON costp.feature_guid = g.feature_guid 
+        AND toDate(s.doc_datetime) >= toDate(costp.doc_date)
+    LEFT JOIN first_prc fp 
+        ON fp.model_id = g.model_id 
+        AND fp.colorname = bc.colorname
+    WHERE 
+        toYear(s.doc_datetime) = 2024 
+        AND toISOWeek(s.doc_datetime) >= 35
+        AND wh.sales_channel IN ('Розница', 'ИМ')
+        AND s.op_qty > 0
+    GROUP BY 
+        sale_date,
+        model_id,
+        model_guid,
+        feature_guid, 
+        color_name,
+        colormodel,
+        subgroup_name,
+        category_name,
+        size,
+        price_per_item,
+        cost_per_item,
+        first_prc,
+        current_prc,
+        capsule_start_date
+),
+stock AS (
+    SELECT 
+        toDate(st.data_date) AS stock_date,
+        st.feature_guid AS feature_guid,
+        SUM(st.end_qty) AS total_end_qty,
+        SUM(st.cost) AS cost_stock
+    FROM mart.btbf_stocks st
+    LEFT JOIN mart.btbd_warehouses_shops wh 
+        ON st.wh_guid = wh.wh_guid 
+    WHERE 
+        wh.wh_type IS NOT NULL
+        AND wh.sales_channel NOT IN ('Маркетплейсы')
+    GROUP BY stock_date, feature_guid
+),
+sales_with_stock AS (
+    SELECT 
+        s.*,
+        st.total_end_qty
+    FROM Sales s
+    LEFT JOIN stock st 
+        ON s.sale_date = st.stock_date 
+        AND s.feature_guid = st.feature_guid
+),
+aggregated_sales AS (
+    SELECT 
+        sale_date AS date,
+        model_guid, 
+        model_id,
+        colormodel,
+        subgroup_name,
+        category_name,
+        size,
+        capsule_start_date,
+        first_prc,
+        current_prc,
+        SUM(cnt) AS sales_cnt,
+        SUM(total_end_qty) AS stock_qty,
+        SUM(revenue) AS revenue,
+        SUM(cost) AS cost,
+        SUM(margin) AS margin
+    FROM sales_with_stock
+    GROUP BY
+        date,
+        model_guid,
+        model_id,
+        colormodel,
+        subgroup_name,
+        category_name,
+        size,
+        capsule_start_date,
+        first_prc,
+        current_prc
+)
+SELECT 
+    date,
+    toISOWeek(date) AS week_number,
+    toMonth(date) AS month,
+    model_guid,
+    model_id,
+    colormodel,
+    subgroup_name,
+    category_name,
+    size,
+    capsule_start_date,
+    sales_cnt,
+    stock_qty,
+    revenue / sales_cnt AS actual_price_per_item,
+    1 - (revenue / sales_cnt) / first_prc AS discount_percent_first,
+    CASE
+        WHEN discount_percent_first < 0.05 THEN '0% (без скидки)'
+        WHEN discount_percent_first <= 0.3 THEN '1-30%'
+        WHEN discount_percent_first <= 0.5 THEN '31-50%'
+        WHEN discount_percent_first <= 0.7 THEN '51-70%'
+        ELSE '71%+'
+    END AS discount_group_first,
+    1 - (revenue / sales_cnt) / current_prc AS discount_percent_current,
+    CASE
+        WHEN discount_percent_current < 0.05 THEN '0% (без скидки)'
+        WHEN discount_percent_current <= 0.3 THEN '1-30%'
+        WHEN discount_percent_current <= 0.5 THEN '31-50%'
+        WHEN discount_percent_current <= 0.7 THEN '51-70%'
+        ELSE '71%+'
+    END AS discount_group_current,
+    if(cost > 0, revenue / cost, NULL) AS markup,
+    CASE 
+        WHEN markup < 2 THEN '<2'
+        WHEN markup < 3 THEN '2-3'
+        WHEN markup < 4 THEN '3-4'
+        ELSE '>=4'
+    END AS markup_group,
+    first_prc,
+    current_prc,
+    cost / sales_cnt AS cost_per_item,
+    revenue AS GMV,
+    cost AS Costs,
+    margin
+FROM aggregated_sales
+WHERE sales_cnt > 0
+ORDER BY colormodel, date;

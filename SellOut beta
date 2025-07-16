@@ -1,0 +1,340 @@
+WITH channels AS (
+        SELECT 'Розница' AS channel
+        UNION ALL
+        SELECT 'ИМ' AS channel
+        UNION ALL
+        SELECT 'Wildberries' AS channel
+        UNION ALL
+        SELECT 'Lamoda' AS channel
+        UNION ALL
+        SELECT 'CS' AS channel
+    ),
+    prices_retail AS (
+        SELECT 
+            model_id,
+            colorname,
+            date_from,
+            new_price AS retail_price
+        FROM mart.btbf_retail_prices
+        WHERE price_type IN ('ПРЦ', 'Скидка')
+    ),
+    prices_wb AS (
+        SELECT 
+            model_id,
+            colorname,
+            date_from,
+            new_price AS wb_price
+        FROM mart.btbf_retail_prices
+        WHERE price_type = 'Цена WB'
+    ),
+    prices_lm AS (
+        SELECT 
+            model_id,
+            colorname,
+            date_from,
+            new_price AS lm_price
+        FROM mart.btbf_retail_prices
+        WHERE price_type = 'Цена Lamoda'
+    ),
+    goods AS (
+        SELECT 
+            bg.feature_guid AS feature_guid, 
+            vdf.datetime AS dat, 
+            vdf.signs AS "Тип",
+            ch.channel AS channel
+        FROM db1.v_data_fotoscalc vdf
+        LEFT JOIN mart.btbd_goods bg ON vdf.model_id = bg.model_id
+        LEFT JOIN mart.btbd_colors bc ON bc.color_guid = bg.color_guid
+        CROSS JOIN channels ch
+        WHERE 
+            vdf.model_id = bg.model_id 
+            AND vdf.colorname = bc.colorname 
+            AND vdf.datetime > toStartOfYear(today())-2
+    ),
+    sales AS (
+        SELECT 
+            feature_guid, 
+            dat, 
+            channel, 
+            SUM(op_qty) AS sa,
+            SUM(revenue) AS gmv,
+            SUM(cost) AS cost
+        FROM (
+            SELECT 
+                bsa.feature_guid AS feature_guid,
+                g.dat AS dat,
+                CASE 
+                    WHEN bws.sales_channel = 'Маркетплейсы' THEN bws.shop_name 
+                    ELSE bws.sales_channel 
+                END AS channel,
+                op_qty,
+                revenue,
+                cost
+            FROM mart.btbf_sales bsa
+            LEFT JOIN mart.btbd_warehouses_shops bws ON bws.wh_guid = bsa.wh_guid
+            ASOF LEFT JOIN goods g ON bsa.feature_guid = g.feature_guid AND g.dat <= bsa.doc_datetime::Date
+            WHERE bsa.doc_datetime::Date > toStartOfYear(today())-2 AND 
+             bsa.doc_datetime::Date<'2025-07-16'
+        )
+        GROUP BY feature_guid, dat, channel
+    ),
+    stocks_end AS (
+        SELECT 
+            feature_guid, 
+            dat, 
+            channel, 
+            SUM(st_end) AS st_end 
+        FROM (
+            SELECT 
+                bst.feature_guid AS feature_guid,
+                bst.data_date AS dat,
+                CASE 
+                    WHEN bws.sales_channel = 'Маркетплейсы' THEN bws.shop_name 
+                    ELSE CASE 
+                        WHEN bws.wh_guid = '0dfe6e69-bd08-11e9-90f2-7085c281e0ea' THEN 'CS' 
+                        ELSE bws.sales_channel 
+                    END 
+                END AS channel,
+                end_qty AS st_end 
+            FROM mart.btbf_stocks bst
+            LEFT JOIN mart.btbd_warehouses_shops bws ON bws.wh_guid = bst.wh_guid
+            WHERE 
+                bst.data_date = today() - 2
+                AND (
+                    bws.wh_id NOT IN (
+                        SELECT wh_id 
+                        FROM sys_warehouses 
+                        WHERE (`Не_доступен_к_продаже` = 1) 
+                            OR (`Маркет_исключения` = 1) 
+                            OR (`Мусорный_склад` = 1) 
+                            OR (`Склад_входа` = 1)
+                    )
+                    OR wh_guid = '9da8c1e5-11f-f4472-8112-2b5087a94fcb'
+                    OR wh_guid = '421e1d8b-94f-644bc-9a02-1278e3e7e614'
+                )
+        )
+        GROUP BY feature_guid, dat, channel
+    ),
+    stocks_start AS (
+        SELECT 
+            bst.feature_guid AS feature_guid, 
+            bst.data_date AS dat,
+            CASE 
+                WHEN bws.sales_channel = 'Маркетплейсы' THEN bws.shop_name 
+                ELSE CASE 
+                    WHEN bws.wh_guid = '0dfe6e69-bd08-11e9-90f2-7085c281e0ea' THEN 'CS' 
+                    ELSE bws.sales_channel 
+                END 
+            END AS channel,
+            SUM(end_qty) AS st_start 
+        FROM mart.btbf_stocks bst
+        LEFT JOIN mart.btbd_warehouses_shops bws ON bws.wh_guid = bst.wh_guid
+        LEFT JOIN (SELECT feature_guid, dat FROM goods GROUP BY feature_guid, dat) g 
+            ON g.feature_guid = bst.feature_guid
+        WHERE 
+            bst.data_date = g.dat
+            AND (
+                bws.wh_id NOT IN (
+                    SELECT wh_id 
+                    FROM sys_warehouses 
+                    WHERE (`Не_доступен_к_продаже` = 1) 
+                        OR (`Маркет_исключения` = 1) 
+                        OR (`Мусорный_склад` = 1) 
+                        OR (`Склад_входа` = 1)
+                )
+                OR bws.wh_guid = '9da8c1e5-11f-f4472-8112-2b5087a94fcb'
+                OR bws.wh_guid = '421e1d8b-94f-644bc-9a02-1278e3e7e614'
+            )
+        GROUP BY bst.feature_guid, bst.data_date, channel
+    ),
+    stock_days AS (
+        SELECT 
+            feature_guid,
+            dat,
+            channel,
+            COUNT(DISTINCT data_date) AS days_in_stock
+        FROM (
+            SELECT 
+                bst.feature_guid AS feature_guid,
+                g.dat AS dat,
+                CASE 
+                    WHEN bws.sales_channel = 'Маркетплейсы' THEN bws.shop_name 
+                    ELSE bws.sales_channel 
+                END AS channel,
+                bst.data_date AS data_date
+            FROM mart.btbf_stocks bst
+            LEFT JOIN mart.btbd_warehouses_shops bws ON bws.wh_guid = bst.wh_guid
+            ASOF LEFT JOIN goods g ON bst.feature_guid = g.feature_guid AND g.dat <= bst.data_date
+            WHERE 
+                bst.data_date >= g.dat
+                AND bst.data_date <= today() - 2
+                AND bst.end_qty > 0
+                AND (
+                    bws.wh_id NOT IN (
+                        SELECT wh_id 
+                        FROM sys_warehouses 
+                        WHERE (`Не_доступен_к_продаже` = 1) 
+                            OR (`Маркет_исключения` = 1) 
+                            OR (`Мусорный_склад` = 1) 
+                            OR (`Склад_входа` = 1)
+                    )
+                    OR bws.wh_guid = '9da8c1e5-11f-f4472-8112-2b5087a94fcb'
+                    OR bws.wh_guid = '421e1d8b-94f-644bc-9a02-1278e3e7e614'
+                )
+        )
+        GROUP BY feature_guid, dat, channel
+    )
+SELECT 
+    '=ЕСЛИОШИБКА(' || 
+      'ИЗОБРАЖЕНИЕ(СТРОЧН("https://storage.yandexcloud.net/loresizeretouchfotos/' || bg.model_id || '_' || bc.colorname || '.jpeg")); ' ||
+      'ИЗОБРАЖЕНИЕ(СТРОЧН("https://storage.yandexcloud.net/locatalogfotos/img/' || bg2.model_guid || '.jpg"))' ||
+      ')' AS "Фото",
+    'https://storage.yandexcloud.net/loresizeretouchfotos/' || bg.model_id || '_' || bc.colorname || '.jpeg' AS "Ссылка 1",
+    'https://storage.yandexcloud.net/locatalogfotos/img/' || bg2.model_guid || '.jpg' AS "Ссылка 2",
+    bg2.model_name AS "Номенклатура",
+    bmh.group_name AS "Группа",
+    bmh.subgroup_name AS "Подгруппа",
+    bmh.category_name AS "Категория",
+    bmh.subcategory_name AS "Подкатегория",
+    bg.model_guid,
+    CONCAT(bg.model_id, bc.colorname) AS "Артикул - Цвет",
+    bg.model_id AS "Артикул",
+    bc.colorname AS "Цвет",
+    g.dat AS "Дата старта продаж капсулы",
+    arrayStringConcat(
+        arrayFilter(x -> x != '', 
+            [
+                if(SUM(CASE WHEN g.channel = 'Розница' THEN st_end ELSE 0 END) > 0, 'Розница', ''),
+                if(SUM(CASE WHEN g.channel = 'ИМ' THEN st_end ELSE 0 END) > 0, 'ИМ', ''),
+                if(SUM(CASE WHEN g.channel = 'Wildberries' THEN st_end ELSE 0 END) > 0, 'Wildberries', ''),
+                if(SUM(CASE WHEN g.channel = 'Lamoda' THEN st_end ELSE 0 END) > 0, 'Lamoda', '')
+            ]
+        ), 
+        ', '
+    ) AS "Каналы представленности (остатки)",
+    con.link AS "Ссылка",
+    SUM(sa.sa) / SUM(ss.st_start) as SO,
+    CASE 
+        WHEN SUM(CASE WHEN g.channel = 'Розница' THEN ss.st_start ELSE 0 END) > 0 
+        THEN SUM(CASE WHEN g.channel = 'Розница' THEN sa.sa ELSE 0 END) / SUM(CASE WHEN g.channel = 'Розница' THEN ss.st_start ELSE 0 END)
+        ELSE 0 
+    END AS "SellOut Розница %",
+    CASE 
+        WHEN SUM(CASE WHEN g.channel = 'ИМ' THEN ss.st_start ELSE 0 END) > 0 
+        THEN SUM(CASE WHEN g.channel = 'ИМ' THEN sa.sa ELSE 0 END) / SUM(CASE WHEN g.channel = 'ИМ' THEN ss.st_start ELSE 0 END)
+        ELSE 0 
+    END AS "SellOut ИМ %",
+    CASE 
+        WHEN SUM(CASE WHEN g.channel = 'Wildberries' THEN ss.st_start ELSE 0 END) > 0 
+        THEN SUM(CASE WHEN g.channel = 'Wildberries' THEN sa.sa ELSE 0 END) / SUM(CASE WHEN g.channel = 'Wildberries' THEN ss.st_start ELSE 0 END)
+        ELSE 0 
+    END AS "SellOut WB %",
+    CASE 
+        WHEN SUM(CASE WHEN g.channel = 'Lamoda' THEN ss.st_start ELSE 0 END) > 0 
+        THEN SUM(CASE WHEN g.channel = 'Lamoda' THEN sa.sa ELSE 0 END) / SUM(CASE WHEN g.channel = 'Lamoda' THEN ss.st_start ELSE 0 END)
+        ELSE 0 
+    END AS "SellOut LM %",
+    SUM(sa.sa) / (today() - 2 - g.dat) AS "Скорость продаж", 
+    CASE 
+        WHEN SUM(sa.sa) / (today() - 2 - g.dat) > 4 THEN 'Высокая'
+        WHEN SUM(sa.sa) / (today() - 2 - g.dat) < 2.5 THEN 'Низкая'
+        ELSE 'Средняя'
+    END AS "Скорость текстом", 
+    SUM(CASE WHEN g.channel = 'Розница' THEN sa.sa ELSE 0 END) / 
+        SUM(CASE WHEN sd.channel = 'Розница' THEN sd.days_in_stock ELSE 0 END) AS "Скорость продаж Розница",
+    SUM(CASE WHEN g.channel = 'ИМ' THEN sa.sa ELSE 0 END) / 
+        SUM(CASE WHEN sd.channel = 'ИМ' THEN sd.days_in_stock ELSE 0 END) AS "Скорость продаж ИМ",
+    SUM(CASE WHEN g.channel = 'Lamoda' THEN sa.sa ELSE 0 END) / 
+        SUM(CASE WHEN sd.channel = 'Lamoda' THEN sd.days_in_stock ELSE 0 END) AS "Скорость продаж LM",
+    SUM(CASE WHEN g.channel = 'Wildberries' THEN sa.sa ELSE 0 END) / 
+        SUM(CASE WHEN sd.channel = 'Wildberries' THEN sd.days_in_stock ELSE 0 END) AS "Скорость продаж WB",
+    SUM(sa.gmv) / SUM(sa.cost) AS "Маркап",
+    CASE 
+        WHEN SUM(sa.gmv) / SUM(sa.cost) > 4 THEN 'Высокая'
+        WHEN SUM(sa.gmv) / SUM(sa.cost) < 2 THEN 'Низкая'
+        ELSE 'Средняя'
+    END AS "Маржинальность текстом",
+    SUM(sa.gmv) - SUM(sa.cost) AS "Маржа",
+    SUM(sa.gmv) AS "Выручка",
+    SUM(sa.cost) AS "Продажи в себестоимости",
+    AVG(cst.cost) AS "Себестоимось", 
+    MAX(pr.retail_price) AS "Цена Розница",
+    MAX(pr.retail_price) AS "Цена ИМ",
+    MAX(pw.wb_price) AS "Цена WB",
+    MAX(pl.lm_price) AS "Цена LM",
+    CASE 
+        WHEN SUM(CASE WHEN g.channel = 'Розница' AND sa.sa > 0 THEN sa.sa ELSE 0 END) > 0
+        THEN SUM(CASE WHEN g.channel = 'Розница' AND sa.sa > 0 THEN sa.gmv ELSE 0 END)
+             / SUM(CASE WHEN g.channel = 'Розница' AND sa.sa > 0 THEN sa.sa ELSE 0 END)
+        ELSE 0 
+    END AS "Средняя цена Розница",
+    CASE
+        WHEN SUM(CASE WHEN g.channel = 'ИМ' AND sa.sa > 0 THEN sa.sa ELSE 0 END) > 0
+        THEN SUM(CASE WHEN g.channel = 'ИМ' AND sa.sa > 0 THEN sa.gmv ELSE 0 END)
+             / SUM(CASE WHEN g.channel = 'ИМ' AND sa.sa > 0 THEN sa.sa ELSE 0 END)
+        ELSE 0 
+    END AS "Средняя цена ИМ",
+    CASE 
+        WHEN SUM(CASE WHEN g.channel = 'Lamoda' AND sa.sa > 0 THEN sa.sa ELSE 0 END) > 0
+        THEN SUM(CASE WHEN g.channel = 'Lamoda' AND sa.sa > 0 THEN sa.gmv ELSE 0 END)
+             / SUM(CASE WHEN g.channel = 'Lamoda' AND sa.sa > 0 THEN sa.sa ELSE 0 END)
+        ELSE 0 
+    END AS "Средняя цена LM",
+    CASE 
+        WHEN SUM(CASE WHEN g.channel = 'Wildberries' AND sa.sa > 0 THEN sa.sa ELSE 0 END) > 0
+        THEN SUM(CASE WHEN g.channel = 'Wildberries' AND sa.sa > 0 THEN sa.gmv ELSE 0 END)
+             / SUM(CASE WHEN g.channel = 'Wildberries' AND sa.sa > 0 THEN sa.sa ELSE 0 END)
+        ELSE 0 
+    END AS "Средняя цена WB",
+    SUM(ss.st_start) AS "Поступление Итого",
+    SUM(CASE WHEN g.channel = 'Розница' THEN ss.st_start ELSE 0 END) AS "Поступление Розница",
+    SUM(CASE WHEN g.channel = 'ИМ' THEN ss.st_start ELSE 0 END) AS "Поступление ИМ",
+    SUM(CASE WHEN g.channel = 'Wildberries' THEN ss.st_start ELSE 0 END) AS "Поступление WB",
+    SUM(CASE WHEN g.channel = 'Lamoda' THEN ss.st_start ELSE 0 END) AS "Поступление LM",
+    SUM(sa.sa) AS "Продажи/отгрузки всего",
+    SUM(CASE WHEN g.channel = 'Розница' THEN sa.sa ELSE 0 END) AS "Продажи Розница",
+    SUM(CASE WHEN g.channel = 'ИМ' THEN sa.sa ELSE 0 END) AS "Продажи ИМ",
+    SUM(CASE WHEN g.channel = 'Lamoda' THEN sa.sa ELSE 0 END) AS "Продажи LM",
+    SUM(CASE WHEN g.channel = 'Wildberries' THEN sa.sa ELSE 0 END) AS "Продажи WB",
+    SUM(CASE WHEN g.channel = 'CS' THEN st_end ELSE 0 END) AS "ЦС",
+    SUM(st_end)/SUM(sa.sa) AS "Покрытие",
+    SUM(st_end) AS "Остатки всего",
+    SUM(CASE WHEN g.channel IS NULL THEN st_end ELSE 0 END) AS "Остатки ЦС",
+    SUM(CASE WHEN g.channel = 'Розница' THEN st_end ELSE 0 END) AS "Остаток Розница",
+    SUM(CASE WHEN g.channel = 'ИМ' THEN st_end ELSE 0 END) AS "Остаток ИМ",
+    SUM(CASE WHEN g.channel = 'Wildberries' THEN st_end ELSE 0 END) AS "Остаток WB",
+    SUM(CASE WHEN g.channel = 'Lamoda' THEN st_end ELSE 0 END) AS "Остаток LM",
+    1 AS "Тип первоначальный",
+    1 AS "Остатки ЦМ",
+    today() - 2 - g.dat AS "Прошло дней"
+FROM goods g
+LEFT JOIN sales sa ON sa.feature_guid = g.feature_guid AND sa.dat = g.dat AND sa.channel = g.channel
+LEFT JOIN stocks_start ss ON ss.feature_guid = g.feature_guid AND ss.dat = g.dat AND ss.channel = g.channel
+LEFT JOIN stocks_end se ON se.feature_guid = g.feature_guid AND se.channel = g.channel
+LEFT JOIN stock_days sd ON sd.feature_guid = g.feature_guid AND sd.dat = g.dat AND sd.channel = g.channel
+LEFT JOIN mart.btbd_goods bg2 ON bg2.feature_guid = g.feature_guid
+LEFT JOIN mart.btbd_models_hierarchy bmh ON bmh.model_guid = bg2.model_guid
+LEFT JOIN mart.btbd_goods bg ON bg.feature_guid = g.feature_guid
+LEFT JOIN mart.btbd_colors bc ON bc.color_guid = bg.color_guid
+LEFT JOIN mart.btbd_sizes bs ON bs.size_guid = bg2.size_guid
+LEFT JOIN db1.content_on_site con ON con.model_id = bg.model_id AND con.color = bc.colorname
+ASOF LEFT JOIN prices_retail pr ON bg.model_id = pr.model_id AND bc.colorname = pr.colorname AND sa.dat >= pr.date_from
+ASOF LEFT JOIN prices_wb pw ON bg.model_id = pw.model_id AND bc.colorname = pw.colorname AND sa.dat >= pw.date_from
+ASOF LEFT JOIN prices_lm pl ON bg.model_id = pl.model_id AND bc.colorname = pl.colorname AND sa.dat >= pl.date_from
+ASOF LEFT JOIN mart.btbf_costprice cst ON g.feature_guid = cst.feature_guid AND sa.dat >= doc_date
+WHERE toDate(g.dat) > '2025-06-23' AND toDate(g.dat) < '2025-07-15'
+GROUP BY 
+    g.dat, 
+    "Фото",
+    "Ссылка 1",
+    "Ссылка 2",
+    "Ссылка",
+    bg2.model_name, 
+    bmh.group_name, 
+    bmh.subcategory_name, 
+    bmh.subgroup_name, 
+    bmh.category_name,
+    bg.model_id, 
+    bg.model_guid,
+    bc.colorname,
+    con.link

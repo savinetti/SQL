@@ -1,0 +1,146 @@
+WITH
+    capsules AS 
+    (
+        SELECT 
+            vdf.datetime AS start_date,
+            vdf.model_id AS model_id,
+            vdf.colorname AS colorname,
+            g.feature_guid AS feature_guid,
+            g.model_guid AS model_guid,
+            g.size_guid AS size_guid
+        FROM db1.v_data_fotoscalc AS vdf
+        JOIN mart.btbd_goods AS g ON vdf.model_id = g.model_id
+        JOIN mart.btbd_colors AS c ON g.color_guid = c.color_guid AND vdf.colorname = c.colorname
+        WHERE vdf.datetime BETWEEN '2024-06-01' AND '2025-06-30'
+    ),
+    weeks AS (
+        SELECT 
+            c.feature_guid AS feature_guid,
+            c.start_date AS start_date,
+            toStartOfWeek(c.start_date + (n.week_num - 1) * 7) AS week_start_date,
+            n.week_num AS week_number
+        FROM capsules AS c
+        CROSS JOIN (
+            SELECT number + 1 AS week_num 
+            FROM system.numbers 
+            WHERE number < 12
+        ) AS n
+    ),
+    weekly_sales AS
+    (
+        SELECT 
+            w.feature_guid AS feature_guid,
+            w.start_date AS start_date,
+            w.week_number AS week_number,
+            w.week_start_date AS week_start_date,
+            SUM(s.op_qty) AS sales_qty,
+            SUM(s.cost) AS sales_cost,
+            SUM(s.revenue) AS sales_revenue,
+            SUM(s.revenue - s.cost) AS sales_margin
+        FROM weeks AS w
+        LEFT JOIN mart.btbf_sales AS s ON s.feature_guid = w.feature_guid
+            AND toStartOfWeek(CAST(s.doc_datetime AS Date)) = w.week_start_date
+        GROUP BY 
+            w.feature_guid,
+            w.start_date,
+            w.week_number,
+            w.week_start_date
+    ),
+    initial_stocks AS
+    (
+        SELECT 
+            st.feature_guid AS feature_guid,
+            c.start_date AS start_date,
+            SUM(st.end_qty) AS stock_qty,
+            SUM(st.cost) AS stock_cost
+        FROM mart.btbf_stocks AS st
+        JOIN capsules AS c ON st.feature_guid = c.feature_guid
+        LEFT JOIN mart.btbd_warehouses_shops AS ws ON ws.wh_guid = st.wh_guid
+        WHERE 
+            st.data_date = c.start_date
+            AND ( 
+                ws.wh_id NOT IN (
+                    SELECT wh_id 
+                    FROM sys_warehouses 
+                    WHERE (`Не_доступен_к_продаже` = 1) 
+                    OR (`Маркет_исключения` = 1) 
+                    OR (`Мусорный_склад` = 1) 
+                    OR (`Склад_входа` = 1)
+                )
+                OR ws.wh_guid IN (
+                    '9da8c1e5-11f-f4472-8112-2b5087a94fcb',
+                    '421e1d8b-94f-644bc-9a02-1278e3e7e614'
+                )
+            )
+        GROUP BY 
+            st.feature_guid,
+            c.start_date
+    ),
+    seventh_day_stocks AS
+    (
+        SELECT 
+            st.feature_guid AS feature_guid,
+            c.start_date AS start_date,
+            SUM(st.end_qty) AS stock_qty,
+            SUM(st.end_qty * st.cost) AS stock_cost
+        FROM mart.btbf_stocks AS st
+        JOIN capsules AS c ON st.feature_guid = c.feature_guid
+        LEFT JOIN mart.btbd_warehouses_shops AS ws ON ws.wh_guid = st.wh_guid
+        WHERE 
+            st.data_date = c.start_date + 7
+            AND ( 
+                ws.wh_id NOT IN (
+                    SELECT wh_id 
+                    FROM sys_warehouses 
+                    WHERE (`Не_доступен_к_продаже` = 1) 
+                    OR (`Маркет_исключения` = 1) 
+                    OR (`Мусорный_склад` = 1) 
+                    OR (`Склад_входа` = 1)
+                )
+                OR ws.wh_guid IN (
+                    '9da8c1e5-11f-f4472-8112-2b5087a94fcb',
+                    '421e1d8b-94f-644bc-9a02-1278e3e7e614'
+                )
+            )
+        GROUP BY 
+            st.feature_guid,
+            c.start_date
+    )
+SELECT 
+    g.model_name AS "Номенклатура",
+    mh.group_name AS "Группа",
+    mh.subgroup_name AS "Подгруппа",
+    mh.category_name AS "Категория",
+    mh.subcategory_name AS "Подкатегория",
+    g.model_id AS "Артикул",
+    c.colorname AS "Цвет",
+    s.sizename AS "Размер",
+    c.start_date AS "Дата старта капсулы",
+    ws.week_number AS "Номер недели от старта",
+    ws.week_start_date AS "Начало недели",
+    ws.week_start_date + 6 AS "Конец недели",
+    ist.stock_qty AS "Поступление (шт)",
+    ist.stock_cost AS "Поступление (себестоимость)",
+    ws.sales_qty AS "Продажи за неделю (шт)",
+    ws.sales_cost AS "Продажи за неделю (себестоимость)",
+    ws.sales_revenue AS "Выручка за неделю",
+    ws.sales_margin AS "Маржа за неделю",
+    CASE 
+        WHEN ist.stock_cost > 0 THEN ws.sales_cost / ist.stock_cost
+        ELSE 0 
+    END AS "SellOut (%)",
+    sds.stock_qty AS "Остаток на 7-й день (шт)",
+    sds.stock_cost AS "Остаток на 7-й день (себестоимость)"
+FROM capsules AS c
+JOIN weekly_sales AS ws ON ws.feature_guid = c.feature_guid AND ws.start_date = c.start_date
+LEFT JOIN initial_stocks AS ist ON ist.feature_guid = c.feature_guid AND ist.start_date = c.start_date
+LEFT JOIN seventh_day_stocks AS sds ON sds.feature_guid = c.feature_guid AND sds.start_date = c.start_date
+LEFT JOIN mart.btbd_goods AS g ON g.feature_guid = c.feature_guid
+LEFT JOIN mart.btbd_models_hierarchy AS mh ON mh.model_guid = c.model_guid
+LEFT JOIN mart.btbd_sizes AS s ON s.size_guid = c.size_guid
+ORDER BY 
+    c.start_date,
+    g.model_name,
+    c.colorname,
+    s.sizename,
+    ws.week_number
